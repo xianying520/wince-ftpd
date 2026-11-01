@@ -12,6 +12,22 @@
 
 ---
 
+## 〇、现成的 exe
+
+直接下载：<https://github.com/xianying520/wince-ftpd/releases/download/v1.0/ftpd.exe>
+（38,912 字节，直接拷到车机就能用，不用自己编）：
+
+```
+Machine=0x01c0 (ARM)   Subsystem=9 (WinCE GUI)   只导入 COREDLL.dll / WS2.dll
+```
+
+校验过：纯 ARM 指令（不是 Thumb-2），开头机器码与已在真机跑通的 `WinCE-CarLifeHU.exe`
+完全一致，所以 ARMv4T 及以上都能跑。
+
+需要重新编译时按下面任一方式。
+
+---
+
 ## 一、编译
 
 ### 方式 A：CeGCC（命令行，推荐）

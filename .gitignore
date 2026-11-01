@@ -1,7 +1,6 @@
 .build/
 .run/
-build/
+build/*.exe
 *.o
-*.exe
 ftpd.log
 __pycache__/
