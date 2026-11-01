@@ -31,6 +31,7 @@
 
 #include <winsock2.h>
 #include <windows.h>
+#include <iphlpapi.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -1839,19 +1840,111 @@ static void InitLog(void)
     WriteFile(g_log, "\r\n", 2, &written, NULL);
 }
 
+/* 把本机所有可用 IP 写进日志，方便手机端填地址。
+ *
+ * ⚠ 车机常常【不能上互联网】，这时 gethostbyname(本机名) 会失败
+ *   （没有 DNS、名字解析不通），于是日志里一个 IP 都没有，
+ *   现场就没法知道该填什么地址。所以这里绕开名字解析：
+ *     1) 首选 GetAdaptersInfo（iphlpapi），直接读网卡地址表，不需要 DNS；
+ *     2) 退化到 GetIpAddrTable（同样不需要 DNS）；
+ *     3) 都不可用时再退回 gethostbyname。
+ *   三种都失败就明确写一行提示，让人知道该去控制面板看 IP。 */
+static void LogOneIP(DWORD addr)
+{
+    struct in_addr in;
+    char buf[32];
+
+    if (addr == 0 || addr == 0xFFFFFFFFUL) return;
+    in.s_addr = addr;
+    FormatA(buf, sizeof(buf), "%s", inet_ntoa(in));
+    LogA("local address: %s", buf);
+}
+
+static int LogLocalIPsByAdapter(void)
+{
+    DWORD size = 0;
+    char *buf;
+    PIP_ADAPTER_INFO ai;
+    int found = 0;
+
+    if (GetAdaptersInfo(NULL, &size) != ERROR_BUFFER_OVERFLOW || size == 0) {
+        /* 有些实现直接返回成功并给出 size */
+        if (size == 0) size = 8192;
+    }
+    buf = (char *)malloc(size + 64);
+    if (!buf) return 0;
+
+    if (GetAdaptersInfo((PIP_ADAPTER_INFO)buf, &size) == ERROR_SUCCESS) {
+        for (ai = (PIP_ADAPTER_INFO)buf; ai; ai = ai->Next) {
+            IP_ADDR_STRING *ip = &ai->IpAddressList;
+            while (ip) {
+                if (ip->IpAddress.String[0]) {
+                    LogOneIP(inet_addr(ip->IpAddress.String));
+                    found++;
+                }
+                ip = ip->Next;
+            }
+        }
+    }
+    free(buf);
+    return found;
+}
+
+static int LogLocalIPsByTable(void)
+{
+    DWORD size = 0;
+    char *buf;
+    PMIB_IPADDRTABLE tbl;
+    DWORD i;
+    int found = 0;
+
+    if (GetIpAddrTable(NULL, &size, FALSE) != ERROR_INSUFFICIENT_BUFFER || size == 0) {
+        if (size == 0) size = 4096;
+    }
+    buf = (char *)malloc(size + 64);
+    if (!buf) return 0;
+
+    if (GetIpAddrTable((PMIB_IPADDRTABLE)buf, &size, FALSE) == ERROR_SUCCESS) {
+        tbl = (PMIB_IPADDRTABLE)buf;
+        for (i = 0; i < tbl->dwNumEntries; i++) {
+            LogOneIP(tbl->table[i].dwAddr);
+            found++;
+        }
+    }
+    free(buf);
+    return found;
+}
+
 static void LogLocalIPs(void)
 {
     char host[128];
     struct hostent *he;
     int i;
+    int found = 0;
 
-    if (gethostname(host, sizeof(host)) != 0) return;
-    he = gethostbyname(host);
-    if (!he || !he->h_addr_list) return;
-    for (i = 0; he->h_addr_list[i]; i++) {
-        struct in_addr in;
-        memcpy(&in, he->h_addr_list[i], 4);
-        LogA("local address: %s", inet_ntoa(in));
+    found = LogLocalIPsByAdapter();
+    if (found <= 0) found = LogLocalIPsByTable();
+
+    if (found <= 0) {
+        /* 最后退回名字解析（能上网时才有效） */
+        if (gethostname(host, sizeof(host)) == 0) {
+            he = gethostbyname(host);
+            if (he && he->h_addr_list) {
+                for (i = 0; he->h_addr_list[i]; i++) {
+                    struct in_addr in;
+                    memcpy(&in, he->h_addr_list[i], 4);
+                    LogOneIP(in.s_addr);
+                    found++;
+                }
+            }
+        }
+    }
+
+    if (found <= 0) {
+        LogA("local address: (none detected) -- this device may not be");
+        LogA("local address: connected to any network yet. Connect Wi-Fi or");
+        LogA("local address: plug in a network cable, then check the IP in");
+        LogA("local address: Control Panel -> Network and Dial-up Connections.");
     }
 }
 

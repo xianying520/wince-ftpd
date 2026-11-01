@@ -79,7 +79,7 @@ jobs:
         run: |
           export PATH="$HOME/tc/cegcc/bin:$PATH"
           make check
-          make LDFLAGS="$WINCE_LDFLAGS -s" CORELIB="$WINCE_CORELIB" NETLIB="-lws2"
+          make LDFLAGS="$WINCE_LDFLAGS -s" CORELIB="$WINCE_CORELIB" NETLIB="-lws2 -liphlpapi"
 
       - name: 校验产物是 WinCE ARM PE
         run: |

@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <ifaddrs.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
@@ -49,7 +50,8 @@ typedef void *iconv_t;
 typedef int            BOOL;
 typedef unsigned int   DWORD;
 typedef long           LONG;
-typedef unsigned long  ULONG;
+typedef uint32_t       ULONG;
+typedef ULONG         *PULONG;
 typedef unsigned short WORD;
 typedef unsigned char  BYTE;
 typedef void          *LPVOID;
@@ -739,6 +741,116 @@ static inline HANDLE CreateThread(void *sa, size_t stack, DWORD (WINAPI *fn)(LPV
     }
     pthread_attr_destroy(&attr);
     return (HANDLE)shim_new_handle(1);
+}
+
+/* ------------------------------------------------------------ 网卡地址表 */
+#define ERROR_SUCCESS              0
+#define ERROR_BUFFER_OVERFLOW      111
+#define ERROR_INSUFFICIENT_BUFFER  122
+
+typedef struct {
+    char String[16];
+} IP_ADDRESS_STRING, *PIP_ADDRESS_STRING, IP_MASK_STRING, *PIP_MASK_STRING;
+
+typedef struct _SHIM_IP_ADDR_STRING {
+    struct _SHIM_IP_ADDR_STRING *Next;
+    IP_ADDRESS_STRING IpAddress;
+    IP_MASK_STRING    IpMask;
+    uint32_t          Context;
+} IP_ADDR_STRING, *PIP_ADDR_STRING;
+
+typedef struct _SHIM_IP_ADAPTER_INFO {
+    struct _SHIM_IP_ADAPTER_INFO *Next;
+    DWORD ComboIndex;
+    char  AdapterName[260];
+    char  Description[132];
+    DWORD Index;
+    DWORD Type;
+    DWORD DhcpEnabled;
+    IP_ADDR_STRING IpAddressList;
+} IP_ADAPTER_INFO, *PIP_ADAPTER_INFO;
+
+typedef struct {
+    DWORD dwAddr;
+    DWORD dwIndex;
+    DWORD dwMask;
+    DWORD dwBCastAddr;
+    DWORD dwReasmSize;
+    unsigned short unused1;
+    unsigned short unused2;
+} MIB_IPADDRROW, *PMIB_IPADDRROW;
+
+typedef struct {
+    DWORD dwNumEntries;
+    MIB_IPADDRROW table[1];
+} MIB_IPADDRTABLE, *PMIB_IPADDRTABLE;
+
+/* 用 getifaddrs 收集 IPv4 地址，供垫片里的探测函数读取 */
+static inline int shim_collect_ips(DWORD *out, int cap)
+{
+    struct ifaddrs *ifa = NULL, *p;
+    int n = 0;
+
+    if (getifaddrs(&ifa) != 0) return 0;
+    for (p = ifa; p && n < cap; p = p->ifa_next) {
+        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+        out[n++] = ((struct sockaddr_in *)p->ifa_addr)->sin_addr.s_addr;
+    }
+    freeifaddrs(ifa);
+    return n;
+}
+
+static inline DWORD GetAdaptersInfo(PIP_ADAPTER_INFO buf, PULONG size)
+{
+    static DWORD ips[32];
+    static IP_ADAPTER_INFO *chain = NULL;
+    static int built = 0, count = 0;
+    DWORD need;
+    int i;
+
+    if (!built) {
+        IP_ADAPTER_INFO *prev = NULL;
+        count = shim_collect_ips(ips, 32);
+        for (i = 0; i < count; i++) {
+            IP_ADAPTER_INFO *ai = (IP_ADAPTER_INFO *)calloc(1, sizeof(*ai));
+            struct in_addr in;
+            if (!ai) break;
+            in.s_addr = ips[i];
+            snprintf(ai->IpAddressList.IpAddress.String, 16, "%s", inet_ntoa(in));
+            snprintf(ai->AdapterName, sizeof(ai->AdapterName), "if%d", i);
+            if (prev) prev->Next = ai; else chain = ai;
+            prev = ai;
+        }
+        built = 1;
+    }
+
+    need = (DWORD)(count * sizeof(IP_ADAPTER_INFO) + 64);
+    if (!buf || !size || *size < need) {
+        if (size) *size = need;
+        return ERROR_BUFFER_OVERFLOW;
+    }
+    if (chain && count > 0) memcpy(buf, chain, sizeof(IP_ADAPTER_INFO));
+    if (buf && count > 0) buf->Next = NULL;
+    return ERROR_SUCCESS;
+}
+
+static inline DWORD GetIpAddrTable(PMIB_IPADDRTABLE buf, PULONG size, BOOL order)
+{
+    static DWORD ips[32];
+    int n = 0, i;
+    DWORD need;
+
+    (void)order;
+    n = shim_collect_ips(ips, 32);
+    need = (DWORD)(sizeof(DWORD) + (n > 0 ? n : 1) * sizeof(MIB_IPADDRROW) + 64);
+
+    if (!buf || !size || *size < need) {
+        if (size) *size = need;
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+    buf->dwNumEntries = (DWORD)n;
+    for (i = 0; i < n; i++) buf->table[i].dwAddr = ips[i];
+    return ERROR_SUCCESS;
 }
 
 /* ------------------------------------------------------------ 编码 / 路径 */
