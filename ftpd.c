@@ -555,6 +555,32 @@ static void Reply(FtpSession *s, const char *fmt, ...)
  * 四、数据连接
  * ========================================================================*/
 
+/* 优雅地关掉数据连接。
+ *
+ * ⚠ 这里有个真实踩过的坑：直接 closesocket() 在还有未读数据时，
+ *   WinSock 会发 RST 而不是 FIN。手机端多半是用 read/write 循环收目录，
+ *   拿到 RST 会把整份列表当"传输中断"丢掉——表现就是
+ *   「手机里删文件立刻生效，但车机新增的文件怎么刷新都不出现」。
+ *   先 shutdown(SD_SEND) 把 FIN 发出去，再收掉对端可能残留的字节，
+ *   最后才 close，对端就能干净地读到 EOF。 */
+static void DataCloseGraceful(SOCKET d)
+{
+    char sink[512];
+    int guard = 0;
+
+    if (d == INVALID_SOCKET) return;
+
+    shutdown(d, SD_SEND);
+
+    /* 把对端可能还在发的剩余字节读掉，最多读 64KB / 32 次，
+     * 避免对端因 unread data 触发 RST。 */
+    while (guard++ < 32) {
+        int r = SockRecv(d, sink, (int)sizeof(sink), 1000);
+        if (r <= 0) break;
+    }
+    closesocket(d);
+}
+
 static void CloseData(FtpSession *s)
 {
     if (s->pasv != INVALID_SOCKET) {
@@ -906,7 +932,9 @@ static void DoList(FtpSession *s, const WCHAR *arg, int mode)
         }
     }
 
-    closesocket(d);
+    /* 目录列表也必须优雅关闭：手机端拿 RST 会把整份列表当失败丢掉，
+     * 表现就是"新文件怎么刷都不出来"。 */
+    DataCloseGraceful(d);
     Reply(s, "226 Transfer complete.");
 }
 
@@ -959,7 +987,7 @@ static void DoRetr(FtpSession *s, const WCHAR *arg)
     buf = (char *)malloc(32768);
     if (!buf) {
         CloseHandle(h);
-        closesocket(d);
+        DataCloseGraceful(d);
         Reply(s, "451 Out of memory.");
         return;
     }
@@ -971,7 +999,8 @@ static void DoRetr(FtpSession *s, const WCHAR *arg)
 
     free(buf);
     CloseHandle(h);
-    closesocket(d);
+    /* 下载完同样要先把 FIN 发出去，否则手机可能把已收到的尾部当残缺 */
+    DataCloseGraceful(d);
     Reply(s, ok ? "226 Transfer complete." : "426 Transfer aborted.");
 }
 
@@ -1033,7 +1062,7 @@ static void DoStor(FtpSession *s, const WCHAR *arg, BOOL append)
     buf = (char *)malloc(32768);
     if (!buf) {
         CloseHandle(h);
-        closesocket(d);
+        DataCloseGraceful(d);
         Reply(s, "451 Out of memory.");
         return;
     }
@@ -1050,9 +1079,16 @@ static void DoStor(FtpSession *s, const WCHAR *arg, BOOL append)
 
     if (ok && !diskErr && !append) SetEndOfFile(h);
 
+    /* 上传完必须 FlushFileBuffers 再 CloseHandle。
+     * WinCE 的 FAT 写入会先攒在缓存里，不等刷盘就回 226，手机会以为
+     * "上传成功了但文件还没落地"，紧接着去列目录就可能看到旧状态。 */
+    if (ok && !diskErr) FlushFileBuffers(h);
+
     free(buf);
     CloseHandle(h);
-    closesocket(d);
+
+    /* 接收方向：对方发完就会关连接，这里先 shutdown 再把余量读掉 */
+    DataCloseGraceful(d);
 
     if (diskErr) Reply(s, "452 Error writing file (disk full?).");
     else if (!ok) Reply(s, "426 Transfer aborted.");
@@ -1433,6 +1469,50 @@ static BOOL HandleCommand(FtpSession *s, char *verb, char *arg)
             Reply(s, "214-SITE commands:");
             Reply(s, " CHMOD  HELP  SHUTDOWN");
             Reply(s, "214 End");
+            return TRUE;
+        }
+        if (StriPrefix(arg, "DIAG")) {
+            /* 现场诊断：SITE DIAG 会实时扫一遍当前目录并回报，
+             * 用来区分「服务器没看到新文件」和「手机没刷新」。
+             * 手机端多数客户端没有发自定义命令的入口，所以这里同时
+             * 支持 SITE DIAG 和 STAT <path> 两种写法。 */
+            WCHAR virt[MAX_PATH], full[MAX_PATH], mask[MAX_PATH];
+            WIN32_FIND_DATAW fd;
+            HANDLE hFind;
+            int n = 0;
+
+            NormalizeVirtual(s->cwd, L"", virt, MAX_PATH);
+            MakeFull(virt, full, MAX_PATH);
+            WCopy(mask, MAX_PATH, full);
+            {
+                int len = (int)wcslen(mask);
+                if (len > 0 && mask[len - 1] != L'\\') WCat(mask, MAX_PATH, L"\\");
+                WCat(mask, MAX_PATH, L"*");
+            }
+
+            Reply(s, "211-DIAG: live scan of current directory");
+            hFind = FindFirstFileW(mask, &fd);
+            if (hFind != INVALID_HANDLE_VALUE) {
+                do {
+                    char nm[MAX_PATH * 3];
+                    if (fd.cFileName[0] == L'.' &&
+                        (fd.cFileName[1] == 0 ||
+                         (fd.cFileName[1] == L'.' && fd.cFileName[2] == 0))) {
+                        continue;
+                    }
+                    EncodeName(fd.cFileName, nm, sizeof(nm));
+                    SanitizeName(nm);
+                    Reply(s, " %c %10u  %s",
+                          (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 'D' : 'F',
+                          (unsigned)fd.nFileSizeLow, nm);
+                    n++;
+                } while (FindNextFileW(hFind, &fd));
+                FindClose(hFind);
+            }
+            Reply(s, "211-DIAG: %d entries seen by server RIGHT NOW", n);
+            Reply(s, "211-DIAG: if a new file appears above but not on the phone,");
+            Reply(s, "211-DIAG: the delay is the phone client's cache, not this server.");
+            Reply(s, "211 End");   /* 结尾必须是 "211 " + 空格，客户端靠它判断结束 */
             return TRUE;
         }
         if (StriPrefix(arg, "SHUTDOWN")) {

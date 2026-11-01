@@ -478,6 +478,47 @@ def main():
                 f.delete("par%d.bin" % i)
                 f.quit()
 
+        def t_new_file_visible_immediately():
+            """在服务器端直接新建/删除文件后，立刻列目录必须马上反映出来。
+
+            这就是车机现场那个现象：车机上产生了新文件，
+            手机端要刷新很多次才看得到。
+            """
+            f = connect()
+            for i in range(5):
+                name = "fresh_%d.txt" % i
+                with open(os.path.join(ROOT, name), "wb") as fh:
+                    fh.write(b"new content %d" % i)
+                names = f.nlst()
+                assert name in names, ("新文件没立刻出现", name, names)
+                os.unlink(os.path.join(ROOT, name))
+                names = f.nlst()
+                assert name not in names, ("删除后还在", name, names)
+            f.quit()
+
+        def t_list_after_upload():
+            """上传完立刻列表，新文件必须马上在。"""
+            f = connect()
+            for i in range(5):
+                name = "up_then_list_%d.bin" % i
+                f.storbinary("STOR " + name, io.BytesIO(b"x" * (i + 1)))
+                names = f.nlst()
+                assert name in names, ("上传后列表里没有", name, names)
+                f.delete(name)
+            f.quit()
+
+        def t_list_repeat_consistent():
+            """连续列表 10 次，内容必须完全一致（不能时有时无）。"""
+            f = connect()
+            baseline = None
+            for i in range(10):
+                names = sorted(f.nlst())
+                if baseline is None:
+                    baseline = names
+                else:
+                    assert names == baseline, ("第 %d 次列表不一致" % i, names, baseline)
+            f.quit()
+
         def t_misc():
             f = connect()
             assert f.sendcmd("SYST").startswith("215")
@@ -517,6 +558,9 @@ def main():
             ("gbk encoding", t_gbk_mode),
             ("max clients", t_max_clients),
             ("parallel sessions", t_parallel_sessions),
+            ("new file visible immediately", t_new_file_visible_immediately),
+            ("list after upload", t_list_after_upload),
+            ("repeated list consistent", t_list_repeat_consistent),
             ("misc commands", t_misc),
         ]
         for name, fn in tests:

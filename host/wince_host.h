@@ -122,6 +122,15 @@ typedef struct { unsigned short wVersion; unsigned short wHighVersion; } WSADATA
 
 #define WSAEWOULDBLOCK 10035
 
+#define SD_SEND  0x01
+#define SD_BOTH  0x02
+
+static inline int shim_shutdown(int s, int how)
+{
+    return shutdown(s, (how == 0x01) ? SHUT_WR : SHUT_RDWR);
+}
+#define shutdown(s, how) shim_shutdown((s), (how))
+
 static inline int shim_wsa_error(void)
 {
     int e = errno;
@@ -378,6 +387,13 @@ static inline DWORD SetFilePointer(HANDLE h, LONG low, LONG *high, DWORD method)
     r = lseek(sh->fd, (off_t)low, whence);
     if (r < 0) return (DWORD)-1;
     return (DWORD)r;
+}
+
+static inline BOOL FlushFileBuffers(HANDLE h)
+{
+    ShimHandle *sh = (ShimHandle *)h;
+    if (!sh || sh->kind != 0) return FALSE;
+    return fsync(sh->fd) == 0;
 }
 
 static inline BOOL SetEndOfFile(HANDLE h)
