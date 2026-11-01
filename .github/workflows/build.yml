@@ -1,0 +1,100 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 把 WinCE FTP 服务器编成 ARM PE，并在 Linux 上把【同一份源码】跑一遍端到端测试。
+# 前置条件：先跑过 wince-carlife-app 的 1-build-toolchain，Releases 里有 cegcc-arm。
+# ─────────────────────────────────────────────────────────────────────────────
+name: Build WinCE FTP server
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载 CeGCC 工具链
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download cegcc-arm \
+            --repo xianying520/wince-carlife \
+            --pattern 'cegcc-arm-mingw32ce.tar.gz' \
+            --dir "$RUNNER_TEMP" --clobber
+          mkdir -p "$HOME/tc"
+          tar xzf "$RUNNER_TEMP/cegcc-arm-mingw32ce.tar.gz" -C "$HOME/tc"
+          test -x "$HOME/tc/cegcc/bin/arm-mingw32ce-gcc"
+          export PATH="$HOME/tc/cegcc/bin:$PATH"
+          arm-mingw32ce-gcc --version | head -1
+
+      # ── 第一道关：主机上跑真实代码 ──
+      # 编的是同一份 ftpd.c，只套一层 Win32→POSIX 垫片。
+      # 字节序、路径处理、编码、PASV 这些错读代码看不出来，跑一遍就现形。
+      - name: 主机端到端测试（真实源码 + 真实 FTP 客户端）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang
+          mkdir -p .build
+          clang -std=gnu99 -Wall -Wextra -Wno-unused-parameter -I host \
+                -DFTPD_CONSOLE -DFTPD_NO_WINMAIN ftpd.c -o .build/ftpd_host -lpthread -liconv
+          python3 host/test_ftpd.py .build/ftpd_host
+
+      - name: 地址/内存安全检查（ASan）
+        run: |
+          clang -std=gnu99 -g -fsanitize=address -I host \
+                -DFTPD_CONSOLE -DFTPD_NO_WINMAIN ftpd.c -o .build/ftpd_asan -lpthread -liconv
+          ASAN_OPTIONS=detect_leaks=0 python3 host/test_ftpd.py .build/ftpd_asan
+
+      - name: 探测可用的子系统旗标与库名
+        run: |
+          export PATH="$HOME/tc/cegcc/bin:$PATH"
+          printf '#include <windows.h>\nint WINAPI WinMain(HINSTANCE a,HINSTANCE b,LPWSTR c,int d){return 0;}\n' > /tmp/gui.c
+          SUBSYS=""; LIBS=""
+          for F in "-Wl,--subsystem,windowsce" "" "-Wl,--subsystem,9"; do
+            for L in "-lcoredll" ""; do
+              rm -f /tmp/gui.exe
+              if arm-mingw32ce-gcc $F -o /tmp/gui.exe /tmp/gui.c $L >/dev/null 2>&1 \
+                 && python3 scripts/checkpe.py /tmp/gui.exe --quiet; then
+                SUBSYS="$F"; LIBS="$L"
+                echo "✅ 可用: 旗标=[$F] 库=[$L]"
+                break 2
+              fi
+            done
+          done
+          if [ -z "$LIBS" ] && [ -z "$SUBSYS" ]; then
+            if ! python3 scripts/checkpe.py /tmp/gui.exe --quiet 2>/dev/null; then
+              echo "❌ 没有组合能产出合法 WinCE PE"
+              exit 1
+            fi
+          fi
+          echo "WINCE_LDFLAGS=$SUBSYS" >> "$GITHUB_ENV"
+          echo "WINCE_CORELIB=$LIBS"   >> "$GITHUB_ENV"
+
+      - name: 编译 ftpd.exe
+        run: |
+          export PATH="$HOME/tc/cegcc/bin:$PATH"
+          make check
+          make LDFLAGS="$WINCE_LDFLAGS -s" CORELIB="$WINCE_CORELIB" NETLIB="-lws2"
+
+      - name: 校验产物是 WinCE ARM PE
+        run: |
+          python3 scripts/checkpe.py build/ftpd.exe
+          echo "✅ 通过 WinCE ARM GUI 校验"
+
+      # CeGCC 若把 GCC 运行库做成 DLL 依赖，车机上没有就会「一点就闪退」
+      - name: 检查导入的 DLL（防车机闪退）
+        run: |
+          python3 scripts/checkimports.py build/ftpd.exe
+          echo "✅ 只依赖车机自带 DLL"
+
+      - name: 上传产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wince-ftpd
+          path: |
+            build/ftpd.exe
+            ftpd.ini.example
+          if-no-files-found: warn

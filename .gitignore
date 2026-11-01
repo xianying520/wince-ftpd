@@ -1,0 +1,7 @@
+.build/
+.run/
+build/
+*.o
+*.exe
+ftpd.log
+__pycache__/

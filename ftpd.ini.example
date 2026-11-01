@@ -1,0 +1,22 @@
+; WinCE FTP 服务器配置
+; 修改后重新运行 ftpd.exe 生效。文件请用 UTF-8 保存。
+;
+; Port        监听端口。21 被占用时改 2121，手机端端口同步改
+; Root        对外暴露的根目录。"\" = 整个设备；建议收窄，如 \Storage Card
+; User        登录用户名。留空 = 匿名（任意用户名都能进）
+; Password    登录密码。留空 = 不需要密码
+; ReadOnly    1 = 只读（只能浏览/下载）
+; MaxClients  最大并发连接数 1-32
+; LogFile     日志路径。留空 = exe 同目录 ftpd.log；填 none = 关闭日志
+; PasvIP      多网卡设备上强制 PASV 回报的 IP，一般留空
+; Encoding    UTF8（默认）或 GBK（老客户端不认 UTF-8 时用）
+
+Port=21
+Root=\
+User=ftp
+Password=ftp
+ReadOnly=0
+MaxClients=4
+LogFile=
+PasvIP=
+Encoding=UTF8

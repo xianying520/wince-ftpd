@@ -1,0 +1,32 @@
+; WinCE 6.0 ws2.dll 导入定义（LLVM dlltool 可用于生成导入库）
+; 只列出本 FTP 服务器用到的 WinSock 函数；需要更多时按 coredll.def 的方式补。
+LIBRARY WS2
+EXPORTS
+WSAStartup
+WSACleanup
+WSAGetLastError
+WSASetLastError
+accept
+bind
+closesocket
+connect
+getpeername
+gethostbyname
+gethostname
+getsockname
+getsockopt
+htonl
+htons
+inet_addr
+inet_ntoa
+ioctlsocket
+listen
+ntohs
+recv
+recvfrom
+select
+send
+sendto
+setsockopt
+shutdown
+socket
