@@ -37,14 +37,17 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang
           mkdir -p .build
+          # iconv 在 glibc 里属于 libc，不需要 -liconv。写一个小探测确认可用。
+          printf '#include <iconv.h>\nint main(void){iconv_t c=iconv_open("GBK","UTF-8");return c==(iconv_t)-1;}\n' > /tmp/icprobe.c
+          clang /tmp/icprobe.c -o /tmp/icprobe && echo "iconv: glibc 自带"
           clang -std=gnu99 -Wall -Wextra -Wno-unused-parameter -I host \
-                -DFTPD_CONSOLE -DFTPD_NO_WINMAIN ftpd.c -o .build/ftpd_host -lpthread -liconv
+                -DFTPD_CONSOLE -DFTPD_NO_WINMAIN ftpd.c -o .build/ftpd_host -lpthread
           python3 host/test_ftpd.py .build/ftpd_host
 
       - name: 地址/内存安全检查（ASan）
         run: |
           clang -std=gnu99 -g -fsanitize=address -I host \
-                -DFTPD_CONSOLE -DFTPD_NO_WINMAIN ftpd.c -o .build/ftpd_asan -lpthread -liconv
+                -DFTPD_CONSOLE -DFTPD_NO_WINMAIN ftpd.c -o .build/ftpd_asan -lpthread
           ASAN_OPTIONS=detect_leaks=0 python3 host/test_ftpd.py .build/ftpd_asan
 
       - name: 探测可用的子系统旗标与库名

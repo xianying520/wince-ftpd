@@ -38,7 +38,12 @@
 #include <time.h>
 #include <unistd.h>
 #include <wchar.h>
+#if !defined(SHIM_NO_ICONV)
 #include <iconv.h>
+#else
+typedef void *iconv_t;
+#define ICONV_FAIL ((iconv_t)-1)
+#endif
 
 /* ---------------------------------------------------------------- 基本类型 */
 typedef int            BOOL;
